@@ -9,8 +9,8 @@ interface SidebarExpandOnHoverSettings {
 }
 
 const DEFAULT_SETTINGS: SidebarExpandOnHoverSettings = {
-  leftSidebarWidth: 252,
-  rightSidebarWidth: 252,
+  leftSidebarWidth: 325,
+  rightSidebarWidth: 325,
   leftPin: false,
   rightPin: false,
   leftSideEnabled: true,
@@ -316,7 +316,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     leftSidebarWidth.setDesc('Set the width of left sidebar in pixel unit');
     leftSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.leftSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.leftSidebarWidth = Number(value);
         (this.app.workspace.leftSplit as any).setSize(
           this.plugin.settings.leftSidebarWidth
@@ -330,7 +330,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     rightSidebarWidth.setDesc('Set the width of right sidebar in pixel unit');
     rightSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.rightSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.rightSidebarWidth = Number(value);
         (this.app.workspace.rightSplit as any).setSize(
           this.plugin.settings.rightSidebarWidth
