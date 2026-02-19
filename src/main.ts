@@ -9,8 +9,8 @@ interface SidebarExpandOnHoverSettings {
 }
 
 const DEFAULT_SETTINGS: SidebarExpandOnHoverSettings = {
-  leftSidebarWidth: 252,
-  rightSidebarWidth: 252,
+  leftSidebarWidth: 325,
+  rightSidebarWidth: 325,
   leftPin: false,
   rightPin: false,
   leftSideEnabled: true,
@@ -24,6 +24,12 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
   leftSidebar: HTMLElement;
   rightSidebar: HTMLElement;
   isRightEdgeHovering = false;
+
+  // Hover tracking flags — set by mouseenter/mouseleave on the actual
+  // container elements. These are stable across child-element transitions
+  // (mouseenter/mouseleave don't fire when moving between children).
+  private isHoveringLeftRegion = false;
+  private isHoveringRightRegion = false;
 
   private readonly RIGHT_EDGE_TRIGGER_PX = 20;
 
@@ -101,54 +107,40 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
 
   // Adds event listeners to the HTML elements
   setEvents: Function = () => {
-    this.registerDomEvent(document, 'mouseleave', () => {
-      this.collapseSidebar(this.leftSidebar);
-      this.collapseSidebar(this.rightSidebar);
+    // ── Hover tracking ──────────────────────────────────────────────
+    // mouseenter/mouseleave on a container are stable: they do NOT fire
+    // when moving between children (tab buttons, gaps, icons, etc.).
+    // We track both the sidebar split and its ribbon as one "region".
+
+    this.registerDomEvent(this.leftSidebar, 'mouseenter', () => {
+      this.isHoveringLeftRegion = true;
+    });
+    this.registerDomEvent(this.leftSidebar, 'mouseleave', () => {
+      this.isHoveringLeftRegion = false;
+    });
+    this.registerDomEvent(this.leftRibbon, 'mouseenter', () => {
+      this.isHoveringLeftRegion = true;
+    });
+    this.registerDomEvent(this.leftRibbon, 'mouseleave', () => {
+      this.isHoveringLeftRegion = false;
     });
 
-    this.registerDomEvent(
-      (this.app.workspace.rootSplit as any).containerEl,
-      'mouseenter',
-      () => {
-        this.isRightEdgeHovering = false;
-        this.collapseSidebar(this.leftSidebar);
-        this.collapseSidebar(this.rightSidebar);
-      }
-    );
-
-    this.registerDomEvent(document, 'mousemove', (event: MouseEvent) => {
-      if (this.settings.rightPin || !this.settings.rightSideEnabled) {
-        this.isRightEdgeHovering = false;
-        return;
-      }
-
-      if (this.isModalOrMenuOpen()) {
-        this.isRightEdgeHovering = false;
-        return;
-      }
-
-      const mouseX = event.clientX;
-      const editorWidth = this.app.workspace.containerEl.clientWidth;
-      const isNearRightEdge =
-        mouseX >= editorWidth - this.RIGHT_EDGE_TRIGGER_PX;
-
-      if (isNearRightEdge) {
-        this.isRightEdgeHovering = true;
-        this.expandSidebar(this.rightSidebar);
-        return;
-      }
-
-      if (this.isRightEdgeHovering) {
-        this.isRightEdgeHovering = false;
-      }
-
-      const target = event.target as HTMLElement | null;
-      if (target && this.rightSidebar?.contains(target)) {
-        return;
-      }
-
-      this.collapseSidebar(this.rightSidebar);
+    this.registerDomEvent(this.rightSidebar, 'mouseenter', () => {
+      this.isHoveringRightRegion = true;
     });
+    this.registerDomEvent(this.rightSidebar, 'mouseleave', () => {
+      this.isHoveringRightRegion = false;
+    });
+    if (this.rightRibbon) {
+      this.registerDomEvent(this.rightRibbon, 'mouseenter', () => {
+        this.isHoveringRightRegion = true;
+      });
+      this.registerDomEvent(this.rightRibbon, 'mouseleave', () => {
+        this.isHoveringRightRegion = false;
+      });
+    }
+
+    // ── Expand triggers ─────────────────────────────────────────────
 
     this.registerDomEvent(this.leftRibbon, 'mouseenter', () => {
       if (!this.settings.leftPin) {
@@ -164,7 +156,6 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
       });
     }
 
-    // To avoid 'glitch'
     this.registerDomEvent(
       (this.app.workspace.leftSplit as any).resizeHandleEl,
       'mouseenter',
@@ -192,7 +183,61 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
       }
     );
 
-    // Double click on left ribbon to toggle pin/unpin of left sidebar
+    // Right-edge mousemove trigger (right sidebar has no always-visible
+    // ribbon, so we detect proximity to the right edge of the workspace).
+    this.registerDomEvent(document, 'mousemove', (event: MouseEvent) => {
+      if (this.settings.rightPin || !this.settings.rightSideEnabled) {
+        this.isRightEdgeHovering = false;
+        return;
+      }
+
+      if (this.isModalOrMenuOpen()) {
+        this.isRightEdgeHovering = false;
+        return;
+      }
+
+      const mouseX = event.clientX;
+      const editorWidth = this.app.workspace.containerEl.clientWidth;
+      const isNearRightEdge =
+        mouseX >= editorWidth - this.RIGHT_EDGE_TRIGGER_PX;
+
+      if (isNearRightEdge) {
+        this.isRightEdgeHovering = true;
+        this.expandSidebar(this.rightSidebar);
+        return;
+      }
+
+      if (this.isRightEdgeHovering) {
+        this.isRightEdgeHovering = false;
+        if (!this.isHoveringRightRegion) {
+          this.collapseSidebar(this.rightSidebar);
+        }
+      }
+    });
+
+    // ── Collapse triggers ───────────────────────────────────────────
+
+    this.registerDomEvent(
+      (this.app.workspace.rootSplit as any).containerEl,
+      'mouseenter',
+      () => {
+        if (!this.isHoveringLeftRegion) {
+          this.collapseSidebar(this.leftSidebar);
+        }
+        if (!this.isHoveringRightRegion) {
+          this.isRightEdgeHovering = false;
+          this.collapseSidebar(this.rightSidebar);
+        }
+      }
+    );
+
+    this.registerDomEvent(document, 'mouseleave', () => {
+      this.collapseSidebar(this.leftSidebar);
+      this.collapseSidebar(this.rightSidebar);
+    });
+
+    // ── Pin toggles ─────────────────────────────────────────────────
+
     this.registerDomEvent(this.leftRibbon, 'dblclick', () => {
       if (this.settings.leftSideEnabled) {
         this.settings.leftPin = !this.settings.leftPin;
@@ -200,7 +245,6 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
       }
     });
 
-    // Double click on right ribbon to toggle pin/unpin of right sidebar
     if (this.rightRibbon) {
       this.registerDomEvent(this.rightRibbon, 'dblclick', () => {
         if (this.settings.rightSideEnabled) {
@@ -316,7 +360,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     leftSidebarWidth.setDesc('Set the width of left sidebar in pixel unit');
     leftSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.leftSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.leftSidebarWidth = Number(value);
         (this.app.workspace.leftSplit as any).setSize(
           this.plugin.settings.leftSidebarWidth
@@ -330,7 +374,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     rightSidebarWidth.setDesc('Set the width of right sidebar in pixel unit');
     rightSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.rightSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.rightSidebarWidth = Number(value);
         (this.app.workspace.rightSplit as any).setSize(
           this.plugin.settings.rightSidebarWidth
