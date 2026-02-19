@@ -31,16 +31,20 @@ One `document.mousemove` listener, gated by `requestAnimationFrame` for perf:
    - **Leaving right region** -> collapse right sidebar (after delay if configured)
 4. No-op if region unchanged
 
-### Modal/menu handling
+### Overlay handling (generic)
 
-Instead of checking `isModalOrMenuOpen()` on every mousemove, **freeze the current region** when a modal/menu opens. This prevents any expand/collapse while the modal is active, without per-frame DOM queries:
+Obsidian renders all overlays (modals, menus, suggestion popups, tooltips, color pickers, context menus, etc.) **outside** `workspace.containerEl` -- they are appended to `document.body`, not inside `.app-container > .workspace`. This means a single containment check on the event target replaces all class-specific detection:
 
-- Use a `MutationObserver` on `document.body` watching for `.modal-container` / `.menu` additions/removals
-- When modal opens: set `frozen = true`, record current sidebar states
-- When modal closes: set `frozen = false`, re-evaluate region from last known mouse position
-- The mousemove handler early-returns when `frozen`
+```ts
+if (!this.app.workspace.containerEl.contains(event.target as Node)) return;
+```
 
-Alternative (simpler): just skip collapse/expand actions when `isModalOrMenuOpen()` returns true. The check is a single `querySelector` call, which is cheap. The MutationObserver approach avoids even that, but adds complexity. **I'd go with the simpler approach unless perf is a concern.**
+If the mouse is over any overlay, `event.target` will be inside that overlay, not inside the workspace. The check is:
+- **Generic**: handles every overlay type, current and future, with no class names to maintain
+- **Free**: `event.target` is already on the event object; `contains()` is a single DOM tree walk, no querySelector
+- **No MutationObserver needed**, no frozen state, no `isModalOrMenuOpen()` method
+
+This also means `isModalOrMenuOpen()` (which hardcodes `.modal-container` and `.menu`) is removed entirely.
 
 ### What gets removed
 
@@ -85,7 +89,7 @@ document mousemove (rAF-throttled):
   - if mouse NOT in left region AND left sidebar is expanded AND not pinned -> collapse left
   - if mouse NOT in right region AND right sidebar is expanded AND not pinned -> collapse right
   - if mouse near right edge (< RIGHT_EDGE_TRIGGER_PX from wsWidth) -> expand right
-  - skip all if isModalOrMenuOpen()
+  - skip all if event.target is outside workspace.containerEl (generic overlay guard)
 document mouseleave -> collapse both (unchanged)
 ribbon dblclick -> toggle pin (unchanged)
 ```
@@ -94,6 +98,7 @@ ribbon dblclick -> toggle pin (unchanged)
 - rootSplit mouseenter handler
 - All mouseenter/mouseleave on leftSidebar, rightSidebar, leftRibbon, rightRibbon (hover tracking)
 - `isHoveringLeftRegion`, `isHoveringRightRegion`, `isRightEdgeHovering` flags
+- `isModalOrMenuOpen()` method
 
 ### quick-peek-sidebar
 
@@ -104,6 +109,7 @@ document mousemove (rAF-throttled):
   - compute regions (same math, using leftSplit.size, rightSplit.size)
   - if mouse NOT in left region AND left not pinned AND not isActivelyEditing() -> schedule collapseLeft (with sidebarDelay)
   - if mouse NOT in right region AND right not pinned AND not isActivelyEditing() -> schedule collapseRight (with sidebarDelay)
+  - skip all if event.target is outside workspace.containerEl (generic overlay guard)
   - skip all if onlyWhenFocused && !document.hasFocus()
 document mouseleave -> collapse both (unchanged)
 document click -> collapse on editor click (unchanged)
