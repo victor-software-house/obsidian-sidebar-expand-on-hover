@@ -1,6 +1,6 @@
 # Coordinate-based sidebar hover architecture
 
-Replace all mouseenter/mouseleave/elementFromPoint sidebar detection with a single `document.mousemove` handler that uses coordinate math against stored sidebar sizes to determine which region the mouse is in.
+Replace all mouseenter/mouseleave/elementFromPoint sidebar detection with a single `document.mousemove` handler that uses coordinate math to drive both expand and collapse. Pin is toggled via the sidebar toggle buttons.
 
 ## Key discovery
 
@@ -14,7 +14,7 @@ Obsidian stores `leftSplit.size` and `rightSplit.size` (e.g. 325) even when side
            ribbonRight              ribbonRight+leftSize   wsWidth-rightSize            wsWidth
 ```
 
-The right ribbon is collapsed (width 0) in Obsidian, so it doesn't affect layout.
+The right ribbon is empty (0px wide) in standard Obsidian and plays no role.
 
 ## Architecture (shared by both plugins)
 
@@ -22,58 +22,113 @@ The right ribbon is collapsed (width 0) in Obsidian, so it doesn't affect layout
 
 One `document.mousemove` listener, gated by `requestAnimationFrame` for perf:
 
-1. Compute `ribbonRight`, `leftSize`, `rightSize`, `wsWidth` on each frame
-2. Determine region: `left` | `editor` | `right` based on `event.clientX`
-3. On region transition (tracked via `currentRegion` field):
-   - **Entering left region** -> expand left sidebar
-   - **Entering right region** -> expand right sidebar  
-   - **Leaving left region** -> collapse left sidebar (after delay if configured)
-   - **Leaving right region** -> collapse right sidebar (after delay if configured)
-4. No-op if region unchanged
+```
+document mousemove (rAF-throttled):
+  guard: skip if event.target outside workspace.containerEl  (generic overlay guard)
 
-### Overlay handling (generic)
+  compute:
+    ribbonRight    = leftRibbon.containerEl.getBoundingClientRect().right
+    leftSize       = leftSplit.size
+    rightSize      = rightSplit.size
+    wsWidth        = workspace.containerEl.clientWidth
+    x              = event.clientX
 
-Obsidian renders all overlays (modals, menus, suggestion popups, tooltips, color pickers, context menus, etc.) **outside** `workspace.containerEl` -- they are appended to `document.body`, not inside `.app-container > .workspace`. This means a single containment check on the event target replaces all class-specific detection:
+  LEFT:
+    inRibbon     = x < ribbonRight
+    inLeftRegion = x < ribbonRight + leftSize
+    if inRibbon AND left collapsed AND not pinned -> expand left
+    if !inLeftRegion AND left expanded AND not pinned -> schedule collapse left
+
+  RIGHT:
+    inRightTrigger = x > wsWidth - RIGHT_EDGE_TRIGGER_PX
+    inRightRegion  = x > wsWidth - rightSize
+    if inRightTrigger AND right collapsed AND not pinned -> expand right
+    if !inRightRegion AND right expanded AND not pinned -> schedule collapse right
+```
+
+**Left expand trigger is ribbon-only** (`x < ribbonRight`, ~44px) -- matches original behavior. Once expanded, the full left region keeps it open. Collapse fires when mouse leaves the full left region.
+
+**Right expand trigger is edge proximity** (`x > wsWidth - 20px`) -- right ribbon doesn't exist. Once expanded, the full right region keeps it open.
+
+### Overlay guard (generic)
+
+Obsidian appends all overlays (modals, menus, suggestion popups, tooltips, context menus, etc.) to `document.body` outside `workspace.containerEl`. When the mouse is over any overlay, `event.target` is not inside the workspace:
 
 ```ts
 if (!this.app.workspace.containerEl.contains(event.target as Node)) return;
 ```
 
-If the mouse is over any overlay, `event.target` will be inside that overlay, not inside the workspace. The check is:
-- **Generic**: handles every overlay type, current and future, with no class names to maintain
-- **Free**: `event.target` is already on the event object; `contains()` is a single DOM tree walk, no querySelector
-- **No MutationObserver needed**, no frozen state, no `isModalOrMenuOpen()` method
+- **Generic**: handles every overlay type, current and future, no class names
+- **Free**: `event.target` is already on the event; `contains()` is a single DOM tree walk
+- Replaces `isModalOrMenuOpen()` entirely
 
-This also means `isModalOrMenuOpen()` (which hardcodes `.modal-container` and `.menu`) is removed entirely.
+### Pin via sidebar toggle buttons
+
+The sidebar toggle buttons (`.sidebar-toggle-button.mod-left` / `.mod-right`) are the natural pin trigger -- visible on both sides, discoverable, already associated with sidebar state in the user's mental model.
+
+Intercept click on these buttons: `preventDefault` + `stopPropagation` to suppress Obsidian's default toggle, then toggle `leftPin` / `rightPin` instead. Since the plugin controls expand/collapse, the default toggle is redundant.
+
+```ts
+const leftToggle = document.querySelector('.sidebar-toggle-button.mod-left');
+this.registerDomEvent(leftToggle, 'click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (this.settings.leftSideEnabled) {
+    this.settings.leftPin = !this.settings.leftPin;
+    this.saveSettings();
+  }
+});
+```
+
+Same pattern for `.mod-right`. Replaces dblclick-on-ribbon for left, and provides a working pin trigger for right (which had no working trigger before).
+
+### Collapse delay handling
+
+1. When mouse leaves a region, start a collapse timer
+2. If mouse re-enters the region before the timer fires, cancel it
+3. Timer callback re-checks region before collapsing
+
+```ts
+private collapseLeftTimer: number | null = null;
+
+// On leaving left region:
+if (!inLeftRegion && !leftSplit.collapsed && !pinned) {
+  if (!this.collapseLeftTimer) {
+    this.collapseLeftTimer = window.setTimeout(() => {
+      this.collapseLeftTimer = null;
+      if (this.currentRegion !== 'left') {
+        this.collapseSidebar(this.leftSidebar);
+      }
+    }, this.settings.sidebarDelay ?? 0);
+  }
+}
+// On entering left region:
+if (inLeftRegion && this.collapseLeftTimer) {
+  clearTimeout(this.collapseLeftTimer);
+  this.collapseLeftTimer = null;
+}
+```
+
+For expand-on-hover, collapse delay is 0 (instant). For quick-peek-sidebar, it's `settings.sidebarDelay` (default 150ms).
 
 ### What gets removed
 
 - All `mouseenter`/`mouseleave` handlers on sidebar containers, ribbons, and rootSplit
-- All hover tracking flags (`isHoveringLeftRegion`, `isHoveringRightRegion`, `isHoveringLeft`, `isHoveringRight`)
+- All hover tracking flags (`isHoveringLeftRegion`, `isHoveringRightRegion`, `isHoveringLeft`, `isHoveringRight`, `isRightEdgeHovering`)
 - All `elementFromPoint` calls
 - All CSS selector matching on `relatedTarget` / `event.target`
+- `isModalOrMenuOpen()` method (hardcoded `.modal-container` / `.menu`)
+- Right ribbon references (it has no width and no icons)
 - The right trigger zone DOM element (quick-peek-sidebar) -- coordinate check replaces it
-- The `isRightEdgeHovering` flag (expand-on-hover) -- region transition replaces it
+- Ribbon dblclick pin handler -- toggle button click replaces it
 
 ### What stays
 
-- **Ribbon mouseenter** for left sidebar expansion trigger (expand-on-hover only -- it doesn't use the coordinate approach for initial trigger, only for deciding when to collapse)
-- **Pin/dblclick** handlers
-- **document mouseleave** (window exit -> collapse both)
-- **Resize handle mouseenter** for saving width on drag
+- **Resize handle mouseenter** -- saves sidebar width to settings on drag start
+- **document mouseleave** -- collapse both when cursor exits window
 - **document click** handler (quick-peek-sidebar)
 - **layout-change** handler (quick-peek-sidebar)
 - All settings, hotkey commands, CSS variables, overlay mode
-
-Wait -- actually, if we're doing full coordinate-based monitoring, the ribbon mouseenter is redundant. The mousemove handler already detects "mouse entered left region" and expands. The ribbon mouseenter handler is only needed if we want expansion *only* from the ribbon (not from the full sidebar region). 
-
-**Decision point**: Should expansion trigger when the mouse enters *any* part of the left region (x < ribbonRight + leftSize), or only when it enters the ribbon strip (x < ribbonRight)?
-
-For **expand-on-hover**: the original behavior is ribbon-only trigger. But the user wants the sidebar to stay open when hovering its content area. So: **expand when entering the ribbon OR when the sidebar is already expanded and mouse stays in its region. Collapse only when mouse leaves the region.**
-
-This simplifies to: track whether the sidebar is expanded via `leftSplit.collapsed`. If the mouse is in the left region AND sidebar is collapsed, only expand from the ribbon trigger. If the mouse is in the left region AND sidebar is expanded, keep it open. If the mouse leaves the left region AND sidebar is expanded, collapse it.
-
-For **quick-peek-sidebar**: similar, but it has configurable pixel triggers (e.g. 20px from left edge) and expand delays.
 
 ## Plugin-specific changes
 
@@ -82,23 +137,22 @@ For **quick-peek-sidebar**: similar, but it has configurable pixel triggers (e.g
 **setEvents rewrite:**
 
 ```
-ribbon mouseenter -> expandSidebar (existing trigger, unchanged)
-resize handle mouseenter -> expandSidebar + save size (unchanged)
 document mousemove (rAF-throttled):
-  - compute regions from leftSplit.size, rightSplit.size, ribbon rect, wsWidth
-  - if mouse NOT in left region AND left sidebar is expanded AND not pinned -> collapse left
-  - if mouse NOT in right region AND right sidebar is expanded AND not pinned -> collapse right
-  - if mouse near right edge (< RIGHT_EDGE_TRIGGER_PX from wsWidth) -> expand right
-  - skip all if event.target is outside workspace.containerEl (generic overlay guard)
-document mouseleave -> collapse both (unchanged)
-ribbon dblclick -> toggle pin (unchanged)
+  [unified expand + collapse logic above]
+resize handle mouseenter -> save size to settings (expand is handled by mousemove)
+document mouseleave -> collapse both
+.sidebar-toggle-button.mod-left click -> toggle leftPin
+.sidebar-toggle-button.mod-right click -> toggle rightPin
 ```
 
 **Remove entirely:**
-- rootSplit mouseenter handler
-- All mouseenter/mouseleave on leftSidebar, rightSidebar, leftRibbon, rightRibbon (hover tracking)
+- Ribbon mouseenter expand handlers (left and right)
+- Ribbon dblclick pin handlers
+- rootSplit mouseenter collapse handler
+- All sidebar/ribbon mouseenter/mouseleave hover tracking
 - `isHoveringLeftRegion`, `isHoveringRightRegion`, `isRightEdgeHovering` flags
 - `isModalOrMenuOpen()` method
+- All right ribbon references
 
 ### quick-peek-sidebar
 
@@ -106,67 +160,31 @@ ribbon dblclick -> toggle pin (unchanged)
 
 ```
 document mousemove (rAF-throttled):
-  - compute regions (same math, using leftSplit.size, rightSplit.size)
-  - if mouse NOT in left region AND left not pinned AND not isActivelyEditing() -> schedule collapseLeft (with sidebarDelay)
-  - if mouse NOT in right region AND right not pinned AND not isActivelyEditing() -> schedule collapseRight (with sidebarDelay)
-  - skip all if event.target is outside workspace.containerEl (generic overlay guard)
-  - skip all if onlyWhenFocused && !document.hasFocus()
-document mouseleave -> collapse both (unchanged)
-document click -> collapse on editor click (unchanged)
+  [unified expand + collapse logic above]
+  skip if onlyWhenFocused && !document.hasFocus()
+document mouseleave -> collapse both
+document click -> collapse on editor click
+.sidebar-toggle-button.mod-left click -> toggle leftPin
+.sidebar-toggle-button.mod-right click -> toggle rightPin
 ```
 
 **attachManualEvents rewrite:**
 
 Keep:
-- leftRibbonMouseEnterHandler (ribbon trigger for left sidebar)
-- leftSplit.containerEl mouseenter -> set isHoveringLeft, add 'hovered' class, trigger expand if collapsed (this is still needed for CSS animation class)
-- rightSplit.containerEl mouseenter -> same for right
-- resize handle mouseenter triggers
-
-Change:
-- Remove `leftSplitMouseLeaveHandler` and `rightSplitMouseLeaveHandler` entirely -- collapse is now handled by the coordinate-based mousemove
-- Remove the right trigger zone DOM element -- coordinate check replaces it
+- Resize handle mouseenter triggers (save size)
 
 Remove:
+- leftRibbonMouseEnterHandler (mousemove handles expand)
+- leftSplit/rightSplit containerEl mouseenter/mouseleave handlers
+- leftSplitMouseLeaveHandler / rightSplitMouseLeaveHandler
 - rootSplit mouseenter handler
+- Right trigger zone DOM element
 
-**The `hovered` CSS class**: quick-peek-sidebar uses this class for CSS transitions. We can add it when expanding and remove it when collapsing, instead of on mouseenter/mouseleave. This decouples it from DOM events.
-
-## Collapse delay handling
-
-Both plugins support configurable collapse delays. With the coordinate approach:
-
-1. When mouse leaves a region, start a collapse timer
-2. If mouse re-enters the region before the timer fires, cancel it
-3. The timer callback checks the region again before collapsing
-
-```ts
-private collapseLeftTimer: number | null = null;
-
-// In mousemove, on leaving left region:
-if (!inLeftRegion && !leftSplit.collapsed && !pinned) {
-  if (!this.collapseLeftTimer) {
-    this.collapseLeftTimer = window.setTimeout(() => {
-      this.collapseLeftTimer = null;
-      // Re-check region from last known mouse position
-      if (this.currentRegion !== 'left') {
-        this.collapseSidebar(this.leftSidebar);
-      }
-    }, this.settings.sidebarDelay ?? 0);
-  }
-}
-// On entering left region, cancel pending collapse:
-if (inLeftRegion && this.collapseLeftTimer) {
-  clearTimeout(this.collapseLeftTimer);
-  this.collapseLeftTimer = null;
-}
-```
-
-For expand-on-hover, the collapse delay is 0 (instant). For quick-peek-sidebar, it's `settings.sidebarDelay` (default 150ms).
+**The `hovered` CSS class**: toggle inside `expandSidebar()` / `collapseSidebar()` instead of on mouseenter/mouseleave.
 
 ## Implementation order
 
-1. **sidebar-expand-on-hover**: Rewrite `setEvents` with coordinate-based mousemove. Remove hover flags, rootSplit handler, sidebar mouseenter/mouseleave. Keep ribbon/resize triggers and pin toggles.
-2. **quick-peek-sidebar**: Rewrite `onLayoutReady` rootSplit handler and `attachManualEvents` leave handlers. Remove trigger zone element. Keep ribbon/container mouseenter for CSS class and expand trigger. Replace leave handlers with coordinate-based collapse.
+1. **sidebar-expand-on-hover**: Rewrite `setEvents` with unified coordinate-based mousemove. Remove all hover flags, hover handlers, rootSplit handler, ribbon dblclick. Add toggle button click handlers. Keep resize handle and document mouseleave.
+2. **quick-peek-sidebar**: Same mousemove rewrite. Remove trigger zone element, all container mouseenter/mouseleave, ribbon handlers. Add toggle button click handlers. Move `hovered` class management into expand/collapse methods.
 3. Build and test both.
 4. Amend commits, force-push, rerelease.
