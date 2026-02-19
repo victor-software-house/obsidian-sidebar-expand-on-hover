@@ -9,8 +9,8 @@ interface SidebarExpandOnHoverSettings {
 }
 
 const DEFAULT_SETTINGS: SidebarExpandOnHoverSettings = {
-  leftSidebarWidth: 252,
-  rightSidebarWidth: 252,
+  leftSidebarWidth: 325,
+  rightSidebarWidth: 325,
   leftPin: false,
   rightPin: false,
   leftSideEnabled: true,
@@ -109,10 +109,32 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
     this.registerDomEvent(
       (this.app.workspace.rootSplit as any).containerEl,
       'mouseenter',
-      () => {
-        this.isRightEdgeHovering = false;
-        this.collapseSidebar(this.leftSidebar);
-        this.collapseSidebar(this.rightSidebar);
+      (event: MouseEvent) => {
+        // Use elementFromPoint to verify the pointer isn't actually over a
+        // sidebar element (can happen in overlay layouts where sidebars are
+        // siblings of rootSplit).
+        const el = document.elementFromPoint(event.clientX, event.clientY);
+        const overLeft = el && (
+          el.closest('.workspace-split.mod-left-split') ||
+          el.closest('.workspace-ribbon.side-dock-ribbon.mod-left')
+        );
+        const overRight = el && (
+          el.closest('.workspace-split.mod-right-split')
+        );
+
+        if (!overLeft) {
+          this.collapseSidebar(this.leftSidebar);
+        }
+
+        // Skip right sidebar collapse when the mouse is near the right edge.
+        // Without this guard, fast mouse movements to the edge cause a
+        // mouseenter→collapse / mousemove→expand race loop (flicker).
+        const editorWidth = this.app.workspace.containerEl.clientWidth;
+        const nearRightEdge = event.clientX >= editorWidth - this.RIGHT_EDGE_TRIGGER_PX;
+        if (!nearRightEdge && !overRight) {
+          this.isRightEdgeHovering = false;
+          this.collapseSidebar(this.rightSidebar);
+        }
       }
     );
 
@@ -138,16 +160,19 @@ export default class SidebarExpandOnHoverPlugin extends Plugin {
         return;
       }
 
+      // Only collapse on transition from edge-hovering to not-hovering.
+      // Previously this collapsed on every mousemove, causing flicker when
+      // the sidebar was mid-expand.
       if (this.isRightEdgeHovering) {
         this.isRightEdgeHovering = false;
-      }
 
-      const target = event.target as HTMLElement | null;
-      if (target && this.rightSidebar?.contains(target)) {
-        return;
-      }
+        const target = event.target as HTMLElement | null;
+        if (target && target.closest('.workspace-split.mod-right-split')) {
+          return;
+        }
 
-      this.collapseSidebar(this.rightSidebar);
+        this.collapseSidebar(this.rightSidebar);
+      }
     });
 
     this.registerDomEvent(this.leftRibbon, 'mouseenter', () => {
@@ -316,7 +341,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     leftSidebarWidth.setDesc('Set the width of left sidebar in pixel unit');
     leftSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.leftSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.leftSidebarWidth = Number(value);
         (this.app.workspace.leftSplit as any).setSize(
           this.plugin.settings.leftSidebarWidth
@@ -330,7 +355,7 @@ class SidebarExpandOnHoverSettingTab extends PluginSettingTab {
     rightSidebarWidth.setDesc('Set the width of right sidebar in pixel unit');
     rightSidebarWidth.addText((t) => {
       t.setValue(String(this.plugin.settings.rightSidebarWidth));
-      t.setPlaceholder('Default: 252').onChange(async (value) => {
+      t.setPlaceholder('Default: 325').onChange(async (value) => {
         this.plugin.settings.rightSidebarWidth = Number(value);
         (this.app.workspace.rightSplit as any).setSize(
           this.plugin.settings.rightSidebarWidth
